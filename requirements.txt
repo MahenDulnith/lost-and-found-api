@@ -1,5 +1,5 @@
 Flask==2.3.3
 Pillow==9.5.0
 numpy<2
-tflite-runtime # Or tensorflow if tflite-runtime has issues on Render
+tflite-runtime
 gunicorn==20.1.0
