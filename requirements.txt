@@ -1,11 +1,5 @@
-# For the HTTP trigger and function framework
-functions-framework==3.4.0
-
-# For image processing
+Flask==2.3.3
 Pillow==9.5.0
-
-# For numerical operations (must be <2 for this version of TensorFlow)
 numpy<2
-
-# For running the AI model
-tensorflow==2.15.0
+tflite-runtime # Or tensorflow if tflite-runtime has issues on Render
+gunicorn==20.1.0
