@@ -1,0 +1,7 @@
+0 Keys
+1 Water Bottle
+2 Book / Notebook
+3 ID Card / Wallet
+4 Phone / Charger / Earbuds
+5 Clothing Item
+6 Other
