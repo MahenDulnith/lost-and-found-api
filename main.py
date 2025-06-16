@@ -1,87 +1,81 @@
-from flask import Flask, request, jsonify
+import functions_framework
+from flask import jsonify
+from tensorflow.keras.models import load_model
 from PIL import Image
 import numpy as np
 import io
-# This is the lightweight TensorFlow Lite runtime
-from tflite_runtime.interpreter import Interpreter
 
-# Initialize the Flask app
-app = Flask(__name__)
-
-# --- Load the TFLite model and labels ---
+# --- Load the model and labels (globally) ---
+# This runs only once when the function instance starts, making it fast.
 try:
-    print("Loading TFLite model...")
-    interpreter = Interpreter(model_path="model.tflite")
-    interpreter.allocate_tensors()
+    print("Loading Keras model...")
+    model = load_model("model.tflite") # Note: Keras can load .h5 and .tflite
     print("Model loaded successfully!")
-
-    # Get input and output tensor details
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
 
     print("Loading labels...")
     with open("labels.txt", "r") as f:
-        class_labels = [line.strip() for line in f.readlines()]
+        # Create a clean list of labels without the numbers
+        class_labels = [line.strip().split(' ', 1)[1] for line in f]
     print("Labels loaded successfully:", class_labels)
+
+    # Get input shape for resizing
+    input_shape = model.get_input_details()[0]['shape']
+    IMG_HEIGHT = input_shape[1]
+    IMG_WIDTH = input_shape[2]
 
 except Exception as e:
     print(f"Error loading model or labels: {e}")
-    interpreter = None
+    model = None
     class_labels = None
 
-@app.route("/")
-def index():
-    return "Lightweight TFLite Model Server is running!"
+# This decorator turns the function into an HTTP-triggered Cloud Function
+@functions_framework.http
+def predict(request):
+    # --- CORS Headers (for allowing requests from Bubble) ---
+    headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '3600'
+    }
+    if request.method == 'OPTIONS':
+        return ('', 204, headers)
 
-@app.route("/predict", methods=["POST"])
-def predict():
-    if not interpreter or not class_labels:
-        return jsonify({"error": "Model or labels not loaded"}), 503
+    if not model or not class_labels:
+        return (jsonify({"error": "Model or labels not loaded"}), 503, headers)
 
     if 'image' not in request.files:
-        return jsonify({"error": "No image file in request"}), 400
+        return (jsonify({"error": "No image file in request"}), 400, headers)
 
     file = request.files['image']
 
     try:
-        image = Image.open(file.stream).convert('RGB')
+        image = Image.open(io.BytesIO(file.read())).convert('RGB')
+        image = image.resize((IMG_WIDTH, IMG_HEIGHT))
+        image_array = np.asarray(image)
 
-        # Preprocess the image to match the model's input requirements
-        # Get the required input size from the model's input details
-        height = input_details[0]['shape'][1]
-        width = input_details[0]['shape'][2]
-        image = image.resize((width, height))
+        # Normalize the image to the [-1, 1] range
+        normalized_image_array = (image_array.astype(np.float32) / 127.5) - 1
 
-        # Convert image to numpy array and normalize
-        input_data = np.expand_dims(image, axis=0)
+        # Create the input tensor
+        data = np.expand_dims(normalized_image_array, axis=0)
 
-        # TFLite models exported from Teachable Machine (floating point)
-        # often expect input values normalized to the [-1, 1] range.
-        input_data = (np.float32(input_data) - 127.5) / 127.5
+        # Make a prediction
+        prediction_scores = model.predict(data)[0]
 
-        # Set the tensor, invoke the interpreter, and get the result
-        interpreter.set_tensor(input_details[0]['index'], input_data)
-        interpreter.invoke()
-        prediction_scores = interpreter.get_tensor(output_details[0]['index'])[0]
-
-        # Format the response into the format Bubble expects
+        # Format the response
         predictions = []
         for i, score in enumerate(prediction_scores):
-            # We need to strip the number prefix from the label, e.g., "0 Keys" -> "Keys"
-            label_text = class_labels[i].split(' ', 1)[1]
             predictions.append({
-                "className": label_text,
+                "className": class_labels[i],
                 "probability": float(score)
             })
 
         predictions.sort(key=lambda x: x['probability'], reverse=True)
         print("Top prediction:", predictions[0])
 
-        return jsonify(predictions)
+        return (jsonify(predictions), 200, headers)
 
     except Exception as e:
         print(f"Error during prediction: {e}")
-        return jsonify({"error": "Failed to predict", "details": str(e)}), 500
-
-# This runs the app
-app.run(host='0.0.0.0', port=8080)
+        return (jsonify({"error": "Failed to predict", "details": str(e)}), 500, headers)
