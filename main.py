@@ -1,67 +1,62 @@
-import functions_framework
-from flask import jsonify
-from tensorflow.keras.models import load_model
+from flask import Flask, request, jsonify
 from PIL import Image
 import numpy as np
 import io
+from tflite_runtime.interpreter import Interpreter
 
-# --- Load the model and labels (globally) ---
-# This runs only once when the function instance starts, making it fast.
+# Initialize the Flask app
+app = Flask(__name__)
+
+# --- Load the TFLite model and labels ---
 try:
-    print("Loading Keras model...")
-    model = load_model("model.tflite") # Note: Keras can load .h5 and .tflite
+    print("Loading TFLite model...")
+    interpreter = Interpreter(model_path="model.tflite")
+    interpreter.allocate_tensors()
     print("Model loaded successfully!")
+
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
 
     print("Loading labels...")
     with open("labels.txt", "r") as f:
-        # Create a clean list of labels without the numbers
-        class_labels = [line.strip().split(' ', 1)[1] for line in f]
+        # Clean up labels by removing number prefix and extra spaces
+        class_labels = [line.strip().split(' ', 1)[1] for line in f.readlines()]
     print("Labels loaded successfully:", class_labels)
-
-    # Get input shape for resizing
-    input_shape = model.get_input_details()[0]['shape']
-    IMG_HEIGHT = input_shape[1]
-    IMG_WIDTH = input_shape[2]
 
 except Exception as e:
     print(f"Error loading model or labels: {e}")
-    model = None
+    interpreter = None
     class_labels = None
 
-# This decorator turns the function into an HTTP-triggered Cloud Function
-@functions_framework.http
-def predict(request):
-    # --- CORS Headers (for allowing requests from Bubble) ---
-    headers = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Max-Age': '3600'
-    }
-    if request.method == 'OPTIONS':
-        return ('', 204, headers)
+@app.route("/")
+def index():
+    # A simple route to check if the server is running
+    return "Python TFLite Model Server is running on Render!"
 
-    if not model or not class_labels:
-        return (jsonify({"error": "Model or labels not loaded"}), 503, headers)
+@app.route("/predict", methods=["POST"])
+def predict():
+    if not interpreter or not class_labels:
+        return jsonify({"error": "Model or labels not loaded"}), 503
 
     if 'image' not in request.files:
-        return (jsonify({"error": "No image file in request"}), 400, headers)
+        return jsonify({"error": "No image file in request"}), 400
 
     file = request.files['image']
-
+    
     try:
-        image = Image.open(io.BytesIO(file.read())).convert('RGB')
-        image = image.resize((IMG_WIDTH, IMG_HEIGHT))
-        image_array = np.asarray(image)
+        image = Image.open(file.stream).convert('RGB')
+        
+        # Preprocess the image
+        height = input_details[0]['shape'][1]
+        width = input_details[0]['shape'][2]
+        image = image.resize((width, height))
+        input_data = np.expand_dims(image, axis=0)
+        input_data = (np.float32(input_data) - 127.5) / 127.5
 
-        # Normalize the image to the [-1, 1] range
-        normalized_image_array = (image_array.astype(np.float32) / 127.5) - 1
-
-        # Create the input tensor
-        data = np.expand_dims(normalized_image_array, axis=0)
-
-        # Make a prediction
-        prediction_scores = model.predict(data)[0]
+        # Run prediction
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        prediction_scores = interpreter.get_tensor(output_details[0]['index'])[0]
 
         # Format the response
         predictions = []
@@ -70,12 +65,16 @@ def predict(request):
                 "className": class_labels[i],
                 "probability": float(score)
             })
-
+        
         predictions.sort(key=lambda x: x['probability'], reverse=True)
         print("Top prediction:", predictions[0])
 
-        return (jsonify(predictions), 200, headers)
+        return jsonify(predictions)
 
     except Exception as e:
         print(f"Error during prediction: {e}")
-        return (jsonify({"error": "Failed to predict", "details": str(e)}), 500, headers)
+        return jsonify({"error": "Failed to predict", "details": str(e)}), 500
+
+# This part is needed for some environments but gunicorn handles it on Render
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=8080)
